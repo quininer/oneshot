@@ -180,3 +180,33 @@ fn test_loom_threaded_drop_tx() {
         });
     });
 }
+
+#[test]
+fn test_loom_threaded_drop_rx() {
+    use loom::thread;
+
+    loom::model(|| {
+        let (tx, rx) = oneshot::channel::<Box<usize>>();
+
+        thread::spawn(move || {
+            drop(rx);
+        });
+
+        let _ = tx.send(Box::new(0x42));
+    });
+}
+
+#[test]
+fn test_loom_threaded_drop_tx_rx() {
+    use loom::thread;
+
+    loom::model(|| {
+        let (tx, rx) = oneshot::channel::<Box<usize>>();
+
+        thread::spawn(move || {
+            drop(rx);
+        });
+
+        drop(tx);
+    });
+}

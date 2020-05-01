@@ -177,17 +177,28 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let this = unsafe { self.0.as_ref() };
 
-        match this.state.swap(SEND_DEAD, atomic::Ordering::SeqCst) {
-            RECV_DEAD => unsafe {
-                Box::from_raw(self.0.as_ptr());
-            },
-            UNINIT | LOCKED => (),
-            WAITING => unsafe {
-                this.waker.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-                    .assume_init()
-                    .wake();
-            },
-            _ => unreachable!()
+        loop {
+            match this.state.swap(LOCKED, atomic::Ordering::SeqCst) {
+                RECV_DEAD => unsafe {
+                    Box::from_raw(self.0.as_ptr());
+                    break
+                },
+                UNINIT => (),
+                LOCKED => {
+                    atomic::spin_loop_hint();
+                    continue
+                },
+                WAITING => unsafe {
+                    this.waker.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
+                        .assume_init()
+                        .wake();
+                },
+                _ => unreachable!()
+            }
+
+            this.state.store(SEND_DEAD, atomic::Ordering::SeqCst);
+
+            break
         }
     }
 }
@@ -196,22 +207,34 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let this = unsafe { self.0.as_ref() };
 
-        match this.state.swap(RECV_DEAD, atomic::Ordering::SeqCst) {
-            SEND_DEAD | END => unsafe {
-                Box::from_raw(self.0.as_ptr());
-            },
-            UNINIT | LOCKED => (),
-            WAITING => unsafe {
-                this.waker.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-                    .assume_init();
-            },
-            READY => unsafe {
-                this.value.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-                    .assume_init();
+        loop {
+            match this.state.swap(LOCKED, atomic::Ordering::SeqCst) {
+                SEND_DEAD | END => unsafe {
+                    Box::from_raw(self.0.as_ptr());
+                    break
+                },
+                UNINIT => (),
+                LOCKED => {
+                    atomic::spin_loop_hint();
+                    continue
+                },
+                WAITING => unsafe {
+                    this.waker.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
+                        .assume_init();
+                },
+                READY => unsafe {
+                    this.value.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
+                        .assume_init();
 
-                Box::from_raw(self.0.as_ptr());
-            },
-            _ => unreachable!()
+                    Box::from_raw(self.0.as_ptr());
+                    break
+                },
+                _ => unreachable!()
+            }
+
+            this.state.store(RECV_DEAD, atomic::Ordering::SeqCst);
+
+            break
         }
     }
 }
