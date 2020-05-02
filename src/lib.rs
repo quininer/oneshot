@@ -34,39 +34,36 @@ use std::{ mem, ptr };
 use std::pin::Pin;
 use std::future::Future;
 use std::task::{ Context, Waker, Poll };
-use loom::sync::atomic;
+use loom::sync::atomic::{ AtomicU8, Ordering };
 use loom::cell::UnsafeCell;
 
 
-pub struct Sender<T>(ptr::NonNull<Inner<T>>);
-pub struct Receiver<T>(ptr::NonNull<Inner<T>>);
+pub struct Sender<T>(InlineRc<T>);
+pub struct Receiver<T>(InlineRc<T>);
 
 unsafe impl<T: Send> Send for Sender<T> {}
 unsafe impl<T: Send> Sync for Sender<T> {}
 unsafe impl<T: Send> Send for Receiver<T> {}
 unsafe impl<T: Send> Sync for Receiver<T> {}
 
+struct InlineRc<T>(ptr::NonNull<Inner<T>>);
+
 struct Inner<T> {
+    state: AtomicU8,
     waker: UnsafeCell<mem::MaybeUninit<Waker>>,
     value: UnsafeCell<mem::MaybeUninit<T>>,
-    state: atomic::AtomicU8
 }
 
-const UNINIT:  u8 = 0;
-const LOCKED:  u8 = 1;
-const WAITING: u8 = 2;
-const READY:   u8 = 3;
-
-const SEND_DEAD: u8 = 4;
-const RECV_DEAD: u8 = 5;
-const END:       u8 = 6;
+const WAKER_READY: u8 = 0b00000001;
+const VALUE_READY: u8 = 0b00000010;
+const CLOSED:      u8 = 0b00000100;
 
 
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let inner = Box::new(Inner {
         waker: UnsafeCell::new(mem::MaybeUninit::uninit()),
         value: UnsafeCell::new(mem::MaybeUninit::uninit()),
-        state: atomic::AtomicU8::new(UNINIT)
+        state: AtomicU8::new(0)
     });
 
     let raw_ptr = Box::into_raw(inner);
@@ -74,43 +71,45 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
         ptr::NonNull::new_unchecked(raw_ptr)
     };
 
-    (Sender(raw_ptr), Receiver(raw_ptr))
+    (Sender(InlineRc(raw_ptr)), Receiver(InlineRc(raw_ptr)))
+}
+
+impl<T> InlineRc<T> {
+    #[inline]
+    pub unsafe fn as_ref(&self) -> &Inner<T> {
+        self.0.as_ref()
+    }
 }
 
 impl<T> Sender<T> {
     pub fn send(self, entry: T) -> Result<(), T> {
         let this = unsafe { self.0.as_ref() };
 
-        loop {
-            match this.state.swap(LOCKED, atomic::Ordering::SeqCst) {
-                RECV_DEAD => unsafe {
-                    Box::from_raw(self.0.as_ptr());
-                    mem::forget(self);
-                    return Err(entry);
-                },
-                UNINIT => unsafe {
-                    this.value.with_mut(|ptr| (&mut *ptr).as_mut_ptr()).write(entry);
-                    this.state.store(READY, atomic::Ordering::SeqCst);
-                },
-                LOCKED => {
-                    atomic::spin_loop_hint();
-                    continue
-                },
-                WAITING => unsafe {
-                    this.waker.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-                        .assume_init()
-                        .wake();
-
-                    this.value.with_mut(|ptr| (&mut *ptr).as_mut_ptr()).write(entry);
-                    this.state.store(READY, atomic::Ordering::SeqCst);
-                },
-                _ => unreachable!()
-            }
-
-            break
+        unsafe {
+            this.value.with_mut(|ptr| (&mut *ptr).as_mut_ptr())
+                .write(entry);
         }
 
-        mem::forget(self);
+        let state = this.state.fetch_or(VALUE_READY, Ordering::AcqRel);
+
+        if state & CLOSED == CLOSED {
+            this.state.fetch_and(!VALUE_READY, Ordering::AcqRel);
+
+            let value = unsafe { take(&this.value) };
+
+            return Err(value);
+        }
+
+        if state & WAKER_READY == WAKER_READY {
+            // take waker
+            let state = this.state.fetch_and(!WAKER_READY, Ordering::AcqRel);
+
+            if state & WAKER_READY == WAKER_READY {
+                unsafe {
+                    take(&this.waker).wake();
+                }
+            }
+        }
 
         Ok(())
     }
@@ -122,119 +121,92 @@ impl<T> Future for Receiver<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.0.as_ref() };
 
-        loop {
-            match this.state.swap(LOCKED, atomic::Ordering::SeqCst) {
-                SEND_DEAD | END => {
-                    this.state.store(END, atomic::Ordering::SeqCst);
-                    return Poll::Ready(None);
-                },
-                UNINIT => {
-                    let waker = cx.waker().clone();
+        // take waker
+        let state = this.state.fetch_and(!WAKER_READY, Ordering::AcqRel);
 
-                    unsafe {
-                        this.waker.with_mut(|ptr| (&mut *ptr).as_mut_ptr()).write(waker);
-                    }
+        if state & VALUE_READY == VALUE_READY {
+            let value = unsafe { take(&this.value) };
 
-                    this.state.store(WAITING, atomic::Ordering::SeqCst);
-                },
-                LOCKED => {
-                    atomic::spin_loop_hint();
-                    continue
-                },
-                WAITING => {
-                    let waker_cx = cx.waker();
-                    let waker_ref = unsafe {
-                        &mut *this.waker.with_mut(|ptr| (&mut *ptr).as_mut_ptr())
-                    };
+            this.state.fetch_and(!VALUE_READY, Ordering::AcqRel);
 
-                    if !waker_ref.will_wake(waker_cx) {
-                        let _ = mem::replace(waker_ref, waker_cx.clone());
-                    }
-
-                    this.state.store(WAITING, atomic::Ordering::SeqCst);
-                },
-                READY => {
-                    let value = unsafe {
-                        this.value.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-                            .assume_init()
-                    };
-
-                    this.state.store(END, atomic::Ordering::SeqCst);
-
-                    return Poll::Ready(Some(value));
-                },
-                _ => unreachable!()
-            }
-
-            break
+            return Poll::Ready(Some(value));
         }
+
+        if state & CLOSED == CLOSED {
+            return Poll::Ready(None);
+        }
+
+        if state & WAKER_READY == WAKER_READY {
+            let waker_cx = cx.waker();
+            let waker_ref = unsafe {
+                let waker_ptr = this.waker
+                    .with_mut(|ptr| (&mut *ptr).as_mut_ptr());
+                &mut *waker_ptr
+            };
+
+            if !waker_ref.will_wake(waker_cx) {
+                let _ = mem::replace(waker_ref, waker_cx.clone());
+            }
+        } else {
+            let waker_cx = cx.waker().clone();
+
+            unsafe {
+                this.waker.with_mut(|ptr| &mut *ptr)
+                    .as_mut_ptr()
+                    .write(waker_cx);
+            }
+        }
+
+        this.state.fetch_or(WAKER_READY, Ordering::AcqRel);
 
         Poll::Pending
     }
 }
 
-impl<T> Drop for Sender<T> {
+impl<T> Drop for InlineRc<T> {
     fn drop(&mut self) {
         let this = unsafe { self.0.as_ref() };
 
-        loop {
-            match this.state.swap(LOCKED, atomic::Ordering::SeqCst) {
-                RECV_DEAD => unsafe {
-                    Box::from_raw(self.0.as_ptr());
-                    break
-                },
-                UNINIT => (),
-                LOCKED => {
-                    atomic::spin_loop_hint();
-                    continue
-                },
-                WAITING => unsafe {
-                    this.waker.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-                        .assume_init()
-                        .wake();
-                },
-                _ => unreachable!()
+        let state = this.state.fetch_or(CLOSED, Ordering::AcqRel);
+
+        if state & CLOSED == CLOSED {
+            unsafe {
+                Box::from_raw(self.0.as_ptr());
             }
-
-            this.state.store(SEND_DEAD, atomic::Ordering::SeqCst);
-
-            break
         }
     }
 }
 
-impl<T> Drop for Receiver<T> {
+impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
-        let this = unsafe { self.0.as_ref() };
+        let state = load_u8(&mut self.state);
 
-        loop {
-            match this.state.swap(LOCKED, atomic::Ordering::SeqCst) {
-                SEND_DEAD | END => unsafe {
-                    Box::from_raw(self.0.as_ptr());
-                    break
-                },
-                UNINIT => (),
-                LOCKED => {
-                    atomic::spin_loop_hint();
-                    continue
-                },
-                WAITING => unsafe {
-                    this.waker.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-                        .assume_init();
-                },
-                READY => unsafe {
-                    this.value.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-                        .assume_init();
+        if state & WAKER_READY == WAKER_READY {
+            unsafe { take(&self.waker) };
+        }
 
-                    Box::from_raw(self.0.as_ptr());
-                    break
-                },
-                _ => unreachable!()
-            }
-
-            this.state.store(RECV_DEAD, atomic::Ordering::SeqCst);
-
-            break
+        if state & VALUE_READY == VALUE_READY {
+            unsafe { take(&self.value) };
         }
     }
+}
+
+#[inline]
+unsafe fn take<T>(target: &UnsafeCell<mem::MaybeUninit<T>>) -> T {
+    target.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
+        .assume_init()
+}
+
+#[cfg(feature = "loom")]
+#[inline]
+pub fn load_u8(t: &mut AtomicU8) -> u8 {
+    unsafe {
+        t.unsync_load()
+    }
+}
+
+#[cfg(not(feature = "loom"))]
+#[inline]
+pub fn load_u8(t: &mut AtomicU8) -> u8 {
+    *t.get_mut()
 }

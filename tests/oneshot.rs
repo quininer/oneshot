@@ -29,6 +29,21 @@ struct Spawner {
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 type Incoming = RefCell<Vec<BoxFuture>>;
 
+fn dummy_waker() -> RawWaker {
+    use std::task::RawWakerVTable;
+
+    unsafe fn clone(_: *const ()) -> RawWaker {
+        dummy_waker()
+    }
+
+    unsafe fn wake(_: *const ()) {}
+    unsafe fn wake_by_ref(_: *const ()) {}
+    unsafe fn drop(_: *const ()) {}
+
+    const VTABLE: &RawWakerVTable = &RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+    RawWaker::new(std::ptr::null(), VTABLE)
+}
+
 impl Runtime {
     pub fn new() -> Runtime {
         Runtime {
@@ -42,21 +57,6 @@ impl Runtime {
     }
 
     pub fn block_on<F: Future>(&mut self, fut: F) -> F::Output {
-        fn dummy_waker() -> RawWaker {
-            use std::task::RawWakerVTable;
-
-            unsafe fn clone(_: *const ()) -> RawWaker {
-                dummy_waker()
-            }
-
-            unsafe fn wake(_: *const ()) {}
-            unsafe fn wake_by_ref(_: *const ()) {}
-            unsafe fn drop(_: *const ()) {}
-
-            const VTABLE: &RawWakerVTable = &RawWakerVTable::new(clone, wake, wake_by_ref, drop);
-            RawWaker::new(std::ptr::null(), VTABLE)
-        }
-
         let mut fut = Box::pin(fut);
         let waker = unsafe { Waker::from_raw(dummy_waker()) };
 
@@ -94,7 +94,7 @@ impl Spawner {
 
 
 #[test]
-fn test_local_oneshot() {
+fn test_local_oneshot_ok() {
     loom::model(|| {
         let mut runtime = Runtime::new();
         let spawner = runtime.spawner();
@@ -143,7 +143,7 @@ fn test_local_oneshot_drop_rx() {
 }
 
 #[test]
-fn test_loom_threaded() {
+fn test_loom_threaded_ok() {
     use loom::thread;
 
     loom::model(|| {
@@ -190,6 +190,28 @@ fn test_loom_threaded_drop_rx() {
 
         thread::spawn(move || {
             drop(rx);
+        });
+
+        let _ = tx.send(Box::new(0x42));
+    });
+}
+
+#[test]
+fn test_loom_threaded_poll_drop_rx() {
+    use loom::thread;
+
+    loom::model(|| {
+        let (tx, rx) = oneshot::channel::<Box<usize>>();
+
+        thread::spawn(move || {
+            let waker = unsafe { Waker::from_raw(dummy_waker()) };
+            let mut cx = Context::from_waker(&waker);
+
+            let mut fut = Box::pin(rx);
+
+            let _ = fut.as_mut().poll(&mut cx);
+
+            drop(fut);
         });
 
         let _ = tx.send(Box::new(0x42));
