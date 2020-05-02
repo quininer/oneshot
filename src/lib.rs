@@ -71,17 +71,21 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 
 impl<T> InlineRc<T> {
     #[inline]
-    pub unsafe fn as_ref(&self) -> &Inner<T> {
+    unsafe fn as_ref(&self) -> &Inner<T> {
         self.0.as_ref()
     }
 }
 
 impl<T> Sender<T> {
+    /// Consumes the `Sender`, returning the raw pointer.
     #[inline]
     pub fn into_raw(self) -> ptr::NonNull<Sender<T>> {
         (self.0).0.cast()
     }
 
+    /// # Safety
+    ///
+    /// Constructs an `Sender<T>` from a raw pointer.
     #[inline]
     pub unsafe fn from_raw(ptr: ptr::NonNull<Sender<T>>) -> Sender<T> {
         Sender(InlineRc(ptr.cast()))
