@@ -1,5 +1,5 @@
 [package]
-name = "oneshot"
+name = "futures-oneshot"
 version = "0.1.0"
 authors = ["quininer <quininer@live.com>"]
 edition = "2018"
@@ -7,12 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-loom = { version = "*", optional = true }
+loom = { version = "0.3", optional = true }
 
 [dev-dependencies]
 criterion = "0.3"
-futures-channel = "*"
-tokio = { version = "*", features = [ "sync", "rt-core" ] }
+futures-channel = "0.3"
+tokio = { version = "0.2", features = [ "sync", "rt-core" ] }
 
 [[bench]]
 name = "oneshot"

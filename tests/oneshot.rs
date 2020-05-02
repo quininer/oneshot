@@ -90,8 +90,7 @@ impl Runtime {
 
 impl Spawner {
     pub fn spawn(&self, fut: impl Future<Output = ()> + 'static) {
-        self.incoming.borrow_mut()
-            .push(Box::pin(fut));
+        self.incoming.borrow_mut().push(Box::pin(fut));
     }
 }
 
