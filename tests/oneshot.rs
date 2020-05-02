@@ -1,6 +1,7 @@
 #[cfg(not(feature = "loom"))]
 mod loom {
     pub use std::thread;
+    pub use std::sync;
 
     pub fn model<F>(f: F)
     where
@@ -81,6 +82,8 @@ impl Runtime {
                         .push(task);
                 }
             }
+
+            loom::sync::atomic::spin_loop_hint();
         }
     }
 }

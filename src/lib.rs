@@ -41,10 +41,8 @@ use loom::cell::UnsafeCell;
 pub struct Sender<T>(InlineRc<T>);
 pub struct Receiver<T>(InlineRc<T>);
 
-unsafe impl<T: Send> Send for Sender<T> {}
-unsafe impl<T: Send> Sync for Sender<T> {}
-unsafe impl<T: Send> Send for Receiver<T> {}
-unsafe impl<T: Send> Sync for Receiver<T> {}
+unsafe impl<T: Send> Send for InlineRc<T> {}
+unsafe impl<T: Send> Sync for InlineRc<T> {}
 
 struct InlineRc<T>(ptr::NonNull<Inner<T>>);
 
