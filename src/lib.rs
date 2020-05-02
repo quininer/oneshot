@@ -168,6 +168,7 @@ impl<T> Future for Receiver<T> {
         } else {
             let waker_cx = cx.waker().clone();
 
+            // never race with `send` because value has been checked.
             unsafe {
                 this.waker.with_mut(|ptr| &mut *ptr)
                     .as_mut_ptr()
@@ -176,9 +177,18 @@ impl<T> Future for Receiver<T> {
         }
 
         // if channel is not closed, waker is always available after poll.
-        this.state.fetch_or(WAKER_READY, Ordering::AcqRel);
+        let state = this.state.fetch_or(WAKER_READY, Ordering::AcqRel);
 
-        Poll::Pending
+        // check value again
+        if state & VALUE_READY == VALUE_READY {
+            this.state.fetch_and(!VALUE_READY, Ordering::AcqRel);
+
+            let value = unsafe { take(&this.value) };
+
+            Poll::Ready(Some(value))
+        } else {
+            Poll::Pending
+        }
     }
 }
 

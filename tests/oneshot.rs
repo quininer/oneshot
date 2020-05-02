@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::collections::VecDeque;
 use std::task::{ Context, Waker, RawWaker, Poll };
+use futures_oneshot as oneshot;
 
 struct Runtime {
     queue: VecDeque<BoxFuture>,
