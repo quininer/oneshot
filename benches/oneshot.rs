@@ -9,6 +9,8 @@ fn bench_oneshot_channel(c: &mut Criterion) {
         .unwrap();
 
     c.bench_function("oneshot", |b| {
+        use futures_oneshot as oneshot;
+
         b.iter(|| {
             let (tx, rx) = oneshot::channel::<usize>();
             tx.send(black_box(0x42)).unwrap();
