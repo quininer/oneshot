@@ -13,13 +13,6 @@ mod loom {
             }
 
             #[inline]
-            pub fn with<F, R>(&self, f: F) -> R
-            where F: FnOnce(*const T) -> R
-            {
-                f(self.0.get())
-            }
-
-            #[inline]
             pub fn with_mut<F, R>(&self, f: F) -> R
             where F: FnOnce(*mut T) -> R
             {
@@ -97,8 +90,7 @@ impl<T> Sender<T> {
         let this = unsafe { self.0.as_ref() };
 
         unsafe {
-            this.value.with_mut(|ptr| (&mut *ptr).as_mut_ptr())
-                .write(entry);
+            this.value.with_mut(|ptr| (*ptr).write(entry));
         }
 
         let state = this.state.fetch_or(VALUE_READY, Ordering::AcqRel);
@@ -161,24 +153,22 @@ impl<T> Future for Receiver<T> {
         // check waker
         if state & WAKER_READY == WAKER_READY {
             let waker_cx = cx.waker();
-            let waker_ref = unsafe {
-                let waker_ptr = this.waker
-                    .with_mut(|ptr| (&mut *ptr).as_mut_ptr());
-                &mut *waker_ptr
-            };
 
-            // replace waker if need
-            if !waker_ref.will_wake(waker_cx) {
-                let _ = mem::replace(waker_ref, waker_cx.clone());
-            }
+            this.waker.with_mut(|ptr| unsafe {
+                let waker_ptr = (*ptr).as_mut_ptr();
+                let waker_ref = &mut *waker_ptr;
+
+                // replace waker if need
+                if !waker_ref.will_wake(waker_cx) {
+                    let _ = mem::replace(waker_ref, waker_cx.clone());
+                }
+            });
         } else {
             let waker_cx = cx.waker().clone();
 
             // never race with `send` because value has been checked.
             unsafe {
-                this.waker.with_mut(|ptr| &mut *ptr)
-                    .as_mut_ptr()
-                    .write(waker_cx);
+                this.waker.with_mut(|ptr| (*ptr).write(waker_cx));
             }
         }
 
@@ -216,7 +206,7 @@ impl<T> Drop for InlineRc<T> {
         // check reference count
         if state & CLOSED == CLOSED {
             unsafe {
-                Box::from_raw(self.0.as_ptr());
+                let _ = Box::from_raw(self.0.as_ptr());
             }
         }
     }
@@ -239,8 +229,7 @@ impl<T> Drop for Inner<T> {
 
 #[inline]
 unsafe fn take<T>(target: &UnsafeCell<mem::MaybeUninit<T>>) -> T {
-    target.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()))
-        .assume_init()
+    target.with_mut(|ptr| mem::replace(&mut *ptr, mem::MaybeUninit::uninit()).assume_init())
 }
 
 #[cfg(feature = "loom")]

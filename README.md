@@ -10,5 +10,4 @@ and merges reference count into inner state (like [it](https://github.com/tokio-
 
 * [x] `asan` + `tsan`
 * [x] loom
-* [ ] miri
-  + todo https://github.com/rust-lang/miri/issues/1038
+* [x] miri

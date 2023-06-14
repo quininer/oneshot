@@ -2,6 +2,7 @@
 mod loom {
     pub use std::thread;
     pub use std::sync;
+    pub use std::hint;
 
     pub fn model<F>(f: F)
     where
@@ -84,7 +85,7 @@ impl Runtime {
                 }
             }
 
-            loom::sync::atomic::spin_loop_hint();
+            loom::hint::spin_loop();
         }
     }
 }

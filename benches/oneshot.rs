@@ -3,8 +3,7 @@ use tokio::runtime;
 
 
 fn bench_oneshot_channel(c: &mut Criterion) {
-    let mut rt = runtime::Builder::new()
-        .basic_scheduler()
+    let rt = runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
